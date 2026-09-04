@@ -49,6 +49,9 @@
     "sensor": {
       "battery_voltage": {
         "name": "Battery voltage"
+      },
+      "unread_events": {
+        "name": "Unread activity records"
       }
     }
   },

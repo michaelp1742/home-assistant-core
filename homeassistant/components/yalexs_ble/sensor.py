@@ -23,7 +23,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import YALEXSBLEConfigEntry
 from .entity import YALEXSBLEEntity
-from .models import YaleXSBLEData
+from .models import LockOptions, YaleXSBLEData
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -31,6 +31,7 @@ class YaleXSBLESensorEntityDescription(SensorEntityDescription):
     """Describes Yale Access Bluetooth sensor entity."""
 
     value_fn: Callable[[LockState, LockInfo, ConnectionInfo], int | float | None]
+    exists_fn: Callable[[LockOptions], bool] = lambda options: True
 
 
 SENSORS: tuple[YaleXSBLESensorEntityDescription, ...] = (
@@ -51,6 +52,7 @@ SENSORS: tuple[YaleXSBLESensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         has_entity_name=True,
         native_unit_of_measurement=PERCENTAGE,
+        exists_fn=lambda options: options.battery_reporting,
         value_fn=lambda state, info, connection: (
             state.battery.percentage if state.battery else None
         ),
@@ -64,8 +66,22 @@ SENSORS: tuple[YaleXSBLESensorEntityDescription, ...] = (
         has_entity_name=True,
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         entity_registry_enabled_default=False,
+        exists_fn=lambda options: options.battery_reporting,
         value_fn=lambda state, info, connection: (
             state.battery.voltage if state.battery else None
+        ),
+    ),
+    YaleXSBLESensorEntityDescription(
+        key="unread_events",
+        translation_key="unread_events",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        state_class=SensorStateClass.MEASUREMENT,
+        has_entity_name=True,
+        exists_fn=lambda options: options.activity_count,
+        # None until the first reading, and always None on a library that does
+        # not publish the field.
+        value_fn=lambda state, info, connection: getattr(
+            state, "unread_event_count", None
         ),
     ),
 )
@@ -78,7 +94,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up YALE XS Bluetooth sensors."""
     data = entry.runtime_data
-    async_add_entities(YaleXSBLESensor(description, data) for description in SENSORS)
+    async_add_entities(
+        YaleXSBLESensor(description, data)
+        for description in SENSORS
+        if description.exists_fn(data.options)
+    )
 
 
 class YaleXSBLESensor(YALEXSBLEEntity, SensorEntity):

@@ -6,6 +6,11 @@
           "locked": "mdi:shield-lock"
         }
       }
+    },
+    "sensor": {
+      "unread_events": {
+        "default": "mdi:counter"
+      }
     }
   }
 }

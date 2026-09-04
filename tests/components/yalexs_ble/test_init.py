@@ -1,7 +1,6 @@
 """Test the Yale Access Bluetooth init."""
 
 import logging
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,46 +15,25 @@ from homeassistant.components.yalexs_ble.const import (
     CONF_BATTERY_REPORTING,
     CONF_DOOR_SENSE,
     CONF_KEY,
-    CONF_LOCAL_NAME,
     CONF_SECURE_MODE,
-    CONF_SLOT,
     CONF_UNLATCH,
-    DOMAIN,
     OPTION_DEFAULT,
     OPTION_OFF,
     OPTION_ON,
 )
 from homeassistant.components.yalexs_ble.models import LibraryReport, LockOptions
 from homeassistant.config_entries import ConfigEntryState
-from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import CoreState, HomeAssistant
 
 from . import (
     YALE_ACCESS_LOCK_DISCOVERY_INFO,
+    mock_entry,
     mock_push_lock,
     mock_push_lock_class,
     setup_entry,
 )
 
-from tests.common import MockConfigEntry
-
-KEY = "2fd51b8621c6a139eaffbedcb846b60f"
 ROTATED_KEY = "0d4e5f8621c6a139eaffbedcb846b60f"
-
-
-def _mock_entry(options: dict[str, Any] | None = None) -> MockConfigEntry:
-    """Return a config entry for the lock, with the options given."""
-    return MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            CONF_LOCAL_NAME: YALE_ACCESS_LOCK_DISCOVERY_INFO.name,
-            CONF_ADDRESS: YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
-            CONF_KEY: KEY,
-            CONF_SLOT: 66,
-        },
-        options=options or {},
-        unique_id=YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
-    )
 
 
 async def test_setup_retries_when_not_advertising_at_startup(
@@ -63,7 +41,7 @@ async def test_setup_retries_when_not_advertising_at_startup(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Test setup is retried with a diagnostic reason when not advertising at startup."""
-    entry = _mock_entry()
+    entry = mock_entry()
     hass.set_state(CoreState.starting)
 
     with patch(
@@ -87,7 +65,7 @@ async def test_setup_configures_the_lock_before_start(
 ) -> None:
     """Test the stored choices reach configure() before the lock is started."""
     caplog.set_level(logging.DEBUG, logger="homeassistant.components.yalexs_ble")
-    entry = _mock_entry(
+    entry = mock_entry(
         {
             CONF_ALWAYS_CONNECTED: True,
             CONF_SECURE_MODE: OPTION_ON,
@@ -141,7 +119,7 @@ async def test_setup_uses_the_always_connected_keyword_on_an_older_library(
     hass: HomeAssistant,
 ) -> None:
     """Test a library without configure() takes always_connected as a keyword."""
-    entry = _mock_entry({CONF_ALWAYS_CONNECTED: True, CONF_SECURE_MODE: OPTION_OFF})
+    entry = mock_entry({CONF_ALWAYS_CONNECTED: True, CONF_SECURE_MODE: OPTION_OFF})
     push_lock = mock_push_lock()
     push_lock_class = mock_push_lock_class(push_lock)
 
@@ -198,7 +176,7 @@ async def test_a_library_carried_feature_needs_the_key_accepted(
     resolved: bool,
 ) -> None:
     """Test a feature the library carries follows the report, not the choice."""
-    entry = _mock_entry({option: OPTION_ON})
+    entry = mock_entry({option: OPTION_ON})
     push_lock = mock_push_lock(accepted=accepted, ignored=ignored)
 
     await setup_entry(
@@ -213,7 +191,7 @@ async def test_key_rotation_restart_keeps_the_configured_instance(
     hass: HomeAssistant,
 ) -> None:
     """Test the restart after a key rotation reuses the configured lock."""
-    entry = _mock_entry({CONF_ALWAYS_CONNECTED: True})
+    entry = mock_entry({CONF_ALWAYS_CONNECTED: True})
     async_add_validated_config(
         hass,
         YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
@@ -247,7 +225,7 @@ async def test_setup_passes_nothing_when_no_option_is_stored(
 ) -> None:
     """Test an install that never opened the options page sends no key."""
     caplog.set_level(logging.DEBUG, logger="homeassistant.components.yalexs_ble")
-    entry = _mock_entry()
+    entry = mock_entry()
     push_lock = mock_push_lock()
 
     await setup_entry(
@@ -296,7 +274,7 @@ async def test_setup_warns_only_when_the_library_refuses_a_true_always_connected
     warnings_expected: int,
 ) -> None:
     """Test a refused always connected choice of on is warned and one of off is not."""
-    entry = _mock_entry({CONF_ALWAYS_CONNECTED: stored})
+    entry = mock_entry({CONF_ALWAYS_CONNECTED: stored})
     push_lock = mock_push_lock(ignored=frozenset({"always_connected"}))
 
     await setup_entry(
@@ -319,7 +297,7 @@ async def test_setup_reports_the_choices_an_older_library_cannot_take(
 ) -> None:
     """Test the stored choices a library without the channel drops are named."""
     caplog.set_level(logging.DEBUG, logger="homeassistant.components.yalexs_ble")
-    entry = _mock_entry({CONF_UNLATCH: OPTION_ON, CONF_ACTIVITY_COUNT: OPTION_ON})
+    entry = mock_entry({CONF_UNLATCH: OPTION_ON, CONF_ACTIVITY_COUNT: OPTION_ON})
 
     await setup_entry(hass, entry, mock_push_lock_class(mock_push_lock()))
 

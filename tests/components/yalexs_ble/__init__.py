@@ -1,10 +1,18 @@
 """Tests for the Yale Access Bluetooth integration."""
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from yalexs_ble import ConnectionInfo, DoorStatus, LockInfo, LockState, LockStatus
 
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
+from homeassistant.components.yalexs_ble.const import (
+    CONF_KEY,
+    CONF_LOCAL_NAME,
+    CONF_SLOT,
+    DOMAIN,
+)
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 
 from tests.common import MockConfigEntry
@@ -83,6 +91,25 @@ NOT_YALE_DISCOVERY_INFO = BluetoothServiceInfoBleak(
     connectable=True,
     tx_power=-127,
 )
+
+
+KEY = "2fd51b8621c6a139eaffbedcb846b60f"
+
+
+def mock_entry(options: dict[str, Any] | None = None) -> MockConfigEntry:
+    """Return a config entry for the lock, carrying the options given."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title="Front Door",
+        data={
+            CONF_LOCAL_NAME: YALE_ACCESS_LOCK_DISCOVERY_INFO.name,
+            CONF_ADDRESS: YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
+            CONF_KEY: KEY,
+            CONF_SLOT: 66,
+        },
+        options=options or {},
+        unique_id=YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
+    )
 
 
 def mock_push_lock(
