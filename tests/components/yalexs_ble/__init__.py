@@ -1,5 +1,7 @@
 """Tests for the Yale Access Bluetooth integration."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -157,16 +159,20 @@ def mock_push_lock(
 
 
 def mock_push_lock_class(
-    push_lock: MagicMock, *, has: frozenset[str] = frozenset()
+    push_lock: MagicMock,
+    *,
+    has: frozenset[str] = frozenset(),
+    supported: frozenset[str] = frozenset(),
 ) -> MagicMock:
     """Return a PushLock class mock that constructs push_lock.
 
     has names the entry points the installed library is to have; every other
     guarded name is deleted from the class and from the instance, so hasattr
     answers False for it and the version of the library in the environment
-    decides no branch.
+    decides no branch. supported is the set supported_options() answers with.
     """
     cls = MagicMock(return_value=push_lock)
+    cls.supported_options.return_value = supported
     for name in {"configure", "supported_options", "unlatch"} - has:
         delattr(cls, name)
         # The integration reads configure() and unlatch() from the instance, so
@@ -176,14 +182,24 @@ def mock_push_lock_class(
     return cls
 
 
+@contextmanager
+def patch_push_lock(push_lock_class: MagicMock) -> Iterator[None]:
+    """Patch both names the integration reads PushLock through."""
+    with (
+        patch("homeassistant.components.yalexs_ble.close_stale_connections_by_address"),
+        patch("homeassistant.components.yalexs_ble.PushLock", push_lock_class),
+        patch(
+            "homeassistant.components.yalexs_ble.config_flow.PushLock", push_lock_class
+        ),
+    ):
+        yield
+
+
 async def setup_entry(
     hass: HomeAssistant, entry: MockConfigEntry, push_lock_class: MagicMock
 ) -> None:
     """Set up a config entry against a PushLock class mock."""
     entry.add_to_hass(hass)
-    with (
-        patch("homeassistant.components.yalexs_ble.close_stale_connections_by_address"),
-        patch("homeassistant.components.yalexs_ble.PushLock", push_lock_class),
-    ):
+    with patch_push_lock(push_lock_class):
         await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
