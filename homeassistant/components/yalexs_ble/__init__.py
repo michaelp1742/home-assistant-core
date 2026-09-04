@@ -1,5 +1,9 @@
 """The Yale Access Bluetooth integration."""
 
+from collections.abc import Mapping
+import logging
+from typing import Any
+
 from yalexs_ble import (
     AuthError,
     ConnectionInfo,
@@ -20,17 +24,31 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 
 from .config_cache import async_get_validated_config
 from .const import (
+    CONF_ACTIVITY_COUNT,
     CONF_ALWAYS_CONNECTED,
+    CONF_AUTO_LOCK,
+    CONF_BATTERY_REPORTING,
     CONF_KEY,
     CONF_LOCAL_NAME,
+    CONF_SECURE_MODE,
     CONF_SLOT,
+    CONF_UNLATCH,
     DEVICE_TIMEOUT,
     DOMAIN,
+    FEATURE_OPTIONS,
+    LIBRARY_KEYS,
+    OPTION_ALWAYS_CONNECTED,
+    OPTION_OFF,
+    OPTION_ON,
+    OPTION_PARAMETERS,
+    OPTION_VALUES,
 )
-from .models import YaleXSBLEData
+from .models import LibraryReport, LockOptions, YaleXSBLEData
 from .util import async_find_existing_service_info, bluetooth_callback_matcher
 
 type YALEXSBLEConfigEntry = ConfigEntry[YaleXSBLEData]
+
+_LOGGER = logging.getLogger(__name__)
 
 
 PLATFORMS: list[Platform] = [
@@ -40,6 +58,50 @@ PLATFORMS: list[Platform] = [
 ]
 
 
+def _library_options(stored: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the mapping handed to configure().
+
+    Every stored choice goes down as a bool; a key the user never set, and a
+    key the user set to the library default, are not passed at all, so the
+    library's own answer holds for them.
+    """
+    options: dict[str, Any] = {}
+    if CONF_ALWAYS_CONNECTED in stored:
+        options[OPTION_ALWAYS_CONNECTED] = stored[CONF_ALWAYS_CONNECTED]
+    for key, library_key in LIBRARY_KEYS.items():
+        if (choice := stored.get(key)) in OPTION_VALUES:
+            options[library_key] = OPTION_VALUES[choice]
+    # A page that uses the ioctls can exist only if this key went down.
+    if stored.get(CONF_AUTO_LOCK) == OPTION_ON or stored.get(CONF_UNLATCH) == OPTION_ON:
+        options[OPTION_PARAMETERS] = True
+    return options
+
+
+def _resolve_options(
+    stored: Mapping[str, Any], accepted: frozenset[str]
+) -> LockOptions:
+    """Resolve the stored choices to the values the platforms act on.
+
+    A feature the integration carries alone follows the stored choice; a
+    feature the library carries also needs the library to have accepted its
+    key, so nothing is offered that the lock cannot be asked for.
+    """
+    unlatch = (
+        stored.get(CONF_UNLATCH) == OPTION_ON and LIBRARY_KEYS[CONF_UNLATCH] in accepted
+    )
+    return LockOptions(
+        unlatch=unlatch,
+        secure_mode=stored.get(CONF_SECURE_MODE) != OPTION_OFF,
+        secure_mode_enabled=stored.get(CONF_SECURE_MODE) == OPTION_ON,
+        battery_reporting=stored.get(CONF_BATTERY_REPORTING) != OPTION_OFF,
+        activity_count=stored.get(CONF_ACTIVITY_COUNT) == OPTION_ON
+        and LIBRARY_KEYS[CONF_ACTIVITY_COUNT] in accepted,
+        auto_lock=stored.get(CONF_AUTO_LOCK) == OPTION_ON
+        and OPTION_PARAMETERS in accepted,
+        unlatch_hold_time=unlatch and OPTION_PARAMETERS in accepted,
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: YALEXSBLEConfigEntry) -> bool:
     """Set up Yale Access Bluetooth from a config entry."""
     local_name = entry.data[CONF_LOCAL_NAME]
@@ -47,9 +109,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: YALEXSBLEConfigEntry) ->
     key = entry.data[CONF_KEY]
     slot = entry.data[CONF_SLOT]
     has_unique_local_name = local_name_is_unique(local_name)
-    always_connected = entry.options.get(CONF_ALWAYS_CONNECTED, False)
-    push_lock = PushLock(
-        local_name, address, None, key, slot, always_connected=always_connected
+    library_options = _library_options(entry.options)
+    configure_report: LibraryReport | None = None
+    if hasattr(PushLock, "configure"):
+        push_lock = PushLock(local_name, address, None, key, slot)
+        # The method arrives with the library release that carries the options
+        # channel, so it is read with a default rather than named.
+        configure: Any = getattr(push_lock, "configure", None)
+        # configure() must run before start(): the options are read from the
+        # first update cycle on.
+        report = configure(library_options)
+        configure_report = LibraryReport(
+            accepted=frozenset(report.accepted), ignored=frozenset(report.ignored)
+        )
+        _LOGGER.debug(
+            "%s: passing options to the library: %s; accepted %s; ignored %s",
+            entry.title,
+            ", ".join(sorted(library_options)) or "none",
+            ", ".join(sorted(configure_report.accepted)) or "none",
+            ", ".join(sorted(configure_report.ignored)) or "none",
+        )
+        # A refused True is a lost choice; a refused False is what the library
+        # does on its own.
+        if (
+            library_options.get(OPTION_ALWAYS_CONNECTED)
+            and OPTION_ALWAYS_CONNECTED not in configure_report.accepted
+        ):
+            _LOGGER.warning(
+                "%s: the library did not take the always connected option, so the "
+                "connection follows the library's own answer",
+                entry.title,
+            )
+    else:
+        # A library without the options channel takes always_connected as a
+        # constructor keyword and nothing else.
+        push_lock = PushLock(
+            local_name,
+            address,
+            None,
+            key,
+            slot,
+            always_connected=entry.options.get(CONF_ALWAYS_CONNECTED, False),
+        )
+        if dropped := sorted(
+            option for option in FEATURE_OPTIONS if option in entry.options
+        ):
+            _LOGGER.debug(
+                "%s: the library has no options channel, so the stored feature "
+                "choices are not passed to it: %s",
+                entry.title,
+                ", ".join(dropped),
+            )
+    options = _resolve_options(
+        entry.options, configure_report.accepted if configure_report else frozenset()
     )
     id_ = local_name if has_unique_local_name else address
     push_lock.set_name(f"{entry.title} ({id_})")
@@ -134,7 +246,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: YALEXSBLEConfigEntry) ->
         else:
             raise
 
-    entry.runtime_data = YaleXSBLEData(entry.title, push_lock, always_connected)
+    entry.runtime_data = YaleXSBLEData(
+        entry.title, push_lock, options, configure_report
+    )
 
     @callback
     def _async_device_unavailable(
