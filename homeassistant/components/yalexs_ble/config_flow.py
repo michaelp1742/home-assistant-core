@@ -22,6 +22,7 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.config_entries import (
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlowWithReload,
@@ -29,10 +30,26 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow
+from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 from homeassistant.helpers.typing import DiscoveryInfoType
 
 from .config_cache import async_add_validated_config, async_get_validated_config
-from .const import CONF_ALWAYS_CONNECTED, CONF_KEY, CONF_LOCAL_NAME, CONF_SLOT, DOMAIN
+from .const import (
+    CONF_ALWAYS_CONNECTED,
+    CONF_KEY,
+    CONF_LOCAL_NAME,
+    CONF_SLOT,
+    DOMAIN,
+    FEATURE_GATES,
+    FEATURE_OPTIONS,
+    OPTION_STATES,
+    OPTION_UNCONFIGURED,
+    STEP_LOCK_OPTIONS,
+)
 from .util import async_find_existing_service_info, human_readable_name
 
 _LOGGER = logging.getLogger(__name__)
@@ -369,28 +386,76 @@ class YaleXSBLEOptionsFlowHandler(OptionsFlowWithReload):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage the YaleXSBLE options."""
-        return await self.async_step_device_options()
+        """Show the menu: Lock options, and the parameter pages the stored choices and the library's report allow."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=[STEP_LOCK_OPTIONS],
+            description_placeholders={"title": self.config_entry.title},
+        )
 
-    async def async_step_device_options(
+    async def async_step_lock_options(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage the YaleXSBLE devices options."""
+        """Manage the lock options: the connection and the features."""
+        stored = self.config_entry.options
         if user_input is not None:
-            return self.async_create_entry(
-                data={CONF_ALWAYS_CONNECTED: user_input[CONF_ALWAYS_CONNECTED]},
-            )
+            # Every rendered field is explicit: "not set" clears the key, so a
+            # lock can return to unconfigured, and a stored key outside
+            # FEATURE_OPTIONS, left there by another release, survives.
+            options = {**stored, **user_input}
+            for key in FEATURE_OPTIONS:
+                if options.get(key) == OPTION_UNCONFIGURED:
+                    del options[key]
+            return self.async_create_entry(data=options)
 
+        # The classmethod arrives with the library release that carries the
+        # options channel, so it is read with a default rather than named.
+        supported_options = getattr(PushLock, "supported_options", None)
+        supported: frozenset[str] = (
+            supported_options() if supported_options is not None else frozenset()
+        )
+        supported_text = ", ".join(sorted(supported)) or "none"
+        _LOGGER.debug(
+            "%s: library-supported options: %s",
+            self.config_entry.title,
+            supported_text,
+        )
+        if (
+            self.config_entry.state is ConfigEntryState.LOADED
+            and (report := self.config_entry.runtime_data.configure_report) is not None
+        ):
+            _LOGGER.debug(
+                "%s: options report at setup: accepted %s; ignored %s",
+                self.config_entry.title,
+                ", ".join(sorted(report.accepted)) or "none",
+                ", ".join(sorted(report.ignored)) or "none",
+            )
+        feature_state = SelectSelector(
+            SelectSelectorConfig(
+                options=OPTION_STATES,
+                translation_key="feature_state",
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+        schema: dict[vol.Marker, Any] = {
+            vol.Optional(
+                CONF_ALWAYS_CONNECTED,
+                default=stored.get(CONF_ALWAYS_CONNECTED, False),
+            ): bool
+        }
+        for key in FEATURE_OPTIONS:
+            # A feature the integration carries alone has no gate; the rest
+            # appear when the installed library advertises the key the gate
+            # names, and a key that is already stored appears whatever the
+            # library says, so it can be returned to not set after a library
+            # change.
+            gate = FEATURE_GATES[key]
+            if gate is not None and gate not in supported and key not in stored:
+                continue
+            schema[vol.Optional(key, default=stored.get(key, OPTION_UNCONFIGURED))] = (
+                feature_state
+            )
         return self.async_show_form(
-            step_id="device_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_ALWAYS_CONNECTED,
-                        default=self.config_entry.options.get(
-                            CONF_ALWAYS_CONNECTED, False
-                        ),
-                    ): bool,
-                }
-            ),
+            step_id=STEP_LOCK_OPTIONS,
+            data_schema=vol.Schema(schema),
         )

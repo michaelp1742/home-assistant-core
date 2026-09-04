@@ -13,6 +13,8 @@ CONF_DOOR_SENSE = "door_sense"
 CONF_ACTIVITY_COUNT = "activity_count"
 CONF_AUTO_LOCK = "auto_lock"
 
+STEP_LOCK_OPTIONS = "lock_options"
+
 # The states of a feature option. "Not set" is the absence of a choice: it is
 # rendered for a key the user never set and is never stored. "Library default"
 # is a choice the user made to leave the feature to the library and is stored

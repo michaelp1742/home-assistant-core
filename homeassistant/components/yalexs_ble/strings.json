@@ -62,11 +62,47 @@
   },
   "options": {
     "step": {
-      "device_options": {
-        "data": {
-          "always_connected": "Always connected"
+      "init": {
+        "description": "Choose what to change for {title}.",
+        "menu_option_descriptions": {
+          "lock_options": "Always connected, and the features Home Assistant offers for this lock."
         },
-        "description": "If the lock does not support push updates via advertisements or you want lock operation to be more responsive, you can enable always connected mode. Always connected will cause the lock to stay connected to Home Assistant via Bluetooth, which will use more battery."
+        "menu_options": {
+          "lock_options": "Lock options"
+        },
+        "title": "Options"
+      },
+      "lock_options": {
+        "data": {
+          "activity_count": "Unread activity count",
+          "always_connected": "Always connected",
+          "auto_lock": "Auto-Lock",
+          "battery_reporting": "Battery reporting",
+          "door_sense": "DoorSense",
+          "secure_mode": "Secure mode",
+          "unlatch": "Unlatch"
+        },
+        "data_description": {
+          "activity_count": "On creates a diagnostic sensor for how many activity records remain on the lock. Off removes the sensor and stops the reads.",
+          "always_connected": "Keeps the lock connected to Home Assistant over Bluetooth, for a lock that does not push updates in its advertisements or for faster lock operation.",
+          "auto_lock": "On adds the Auto-Lock setting page to these options. Off removes it.",
+          "battery_reporting": "On creates the battery sensors and reads the battery level from the lock. Off removes the sensors and stops the reads.",
+          "door_sense": "On creates the door sensor and asks the lock for the door state, even on a model not known to have a door sensor. Off removes the sensor and stops the requests.",
+          "secure_mode": "On creates the Secure mode lock entity, enabled, which locks the lock in secure mode. Not set creates it disabled. Off removes it.",
+          "unlatch": "On adds the Open action to the lock entity, which pulls the latch back for a settable duration. Also adds the Unlatch hold time setting page. Off removes it."
+        },
+        "description": "Not set means you have made no choice for the feature. Library default means you chose to leave it to the library. Both send nothing to the library, so its own answer holds for either. On and Off are sent to the library. A feature that Home Assistant adds, the Open action, the unread activity count and Auto-Lock, appears only when it is set to On. A feature whose key the installed library does not take is not offered, and the setup log records which keys were taken.",
+        "title": "Lock options"
+      }
+    }
+  },
+  "selector": {
+    "feature_state": {
+      "options": {
+        "default": "Library default",
+        "off": "Off",
+        "on": "On",
+        "unconfigured": "Not set"
       }
     }
   }

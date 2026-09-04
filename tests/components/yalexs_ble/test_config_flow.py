@@ -1,50 +1,52 @@
 """Test the Yale Access Bluetooth config flow."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+import logging
+from unittest.mock import patch
 
 from bleak import BleakError
 import pytest
-from yalexs_ble import AuthError, DoorStatus, LockInfo, LockState, LockStatus
+from yalexs_ble import AuthError
 
 from homeassistant import config_entries
 from homeassistant.components.yalexs_ble.const import (
+    CONF_ACTIVITY_COUNT,
     CONF_ALWAYS_CONNECTED,
+    CONF_AUTO_LOCK,
+    CONF_BATTERY_REPORTING,
+    CONF_DOOR_SENSE,
     CONF_KEY,
     CONF_LOCAL_NAME,
+    CONF_SECURE_MODE,
     CONF_SLOT,
+    CONF_UNLATCH,
     DOMAIN,
+    OPTION_DEFAULT,
+    OPTION_OFF,
+    OPTION_ON,
+    OPTION_STATES,
+    OPTION_UNCONFIGURED,
+    STEP_LOCK_OPTIONS,
 )
+from homeassistant.config_entries import ConfigEntryState, ConfigFlowResult
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import translation
 
 from . import (
     LOCK_DISCOVERY_INFO_UUID_ADDRESS,
     NOT_YALE_DISCOVERY_INFO,
     OLD_FIRMWARE_LOCK_DISCOVERY_INFO,
     YALE_ACCESS_LOCK_DISCOVERY_INFO,
+    mock_entry,
+    mock_push_lock,
+    mock_push_lock_class,
+    patch_push_lock,
+    setup_entry,
 )
 
 from tests.common import MockConfigEntry
-
-
-def _get_mock_push_lock():
-    """Return a mock PushLock."""
-    mock_push_lock = Mock()
-    mock_push_lock.start = AsyncMock()
-    mock_push_lock.start.return_value = MagicMock()
-    mock_push_lock.wait_for_first_update = AsyncMock()
-    mock_push_lock.stop = AsyncMock()
-    mock_push_lock.lock_state = LockState(
-        LockStatus.UNLOCKED, DoorStatus.CLOSED, None, None, None, None
-    )
-    mock_push_lock.lock_status = LockStatus.UNLOCKED
-    mock_push_lock.door_status = DoorStatus.CLOSED
-    mock_push_lock.lock_info = LockInfo("Front Door", "M1XXX012LU", "1.0.0", "1.0.0")
-    mock_push_lock.device_info = None
-    mock_push_lock.address = YALE_ACCESS_LOCK_DISCOVERY_INFO.address
-    return mock_push_lock
 
 
 @pytest.mark.parametrize("slot", [0, 1, 66])
@@ -1212,46 +1214,318 @@ async def test_user_step_with_cached_config(hass: HomeAssistant) -> None:
     assert len(mock_setup_entry.mock_calls) == 1
 
 
-async def test_options(hass: HomeAssistant) -> None:
-    """Test options."""
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={
-            CONF_LOCAL_NAME: YALE_ACCESS_LOCK_DISCOVERY_INFO.name,
-            CONF_ADDRESS: YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
-            CONF_KEY: "2fd51b8621c6a139eaffbedcb846b60f",
-            CONF_SLOT: 66,
-        },
-        unique_id=YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
+async def _open_lock_options(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> ConfigFlowResult:
+    """Open the options flow and choose the Lock options row."""
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    return await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": STEP_LOCK_OPTIONS}
     )
+
+
+async def test_options_opens_on_the_menu_with_lock_options_alone(
+    hass: HomeAssistant,
+) -> None:
+    """Test the options flow opens on a menu with the Lock options row alone."""
+    entry = mock_entry()
+    push_lock_class = mock_push_lock_class(
+        mock_push_lock(), has=frozenset({"configure", "supported_options"})
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "init"
+    assert result["menu_options"] == [STEP_LOCK_OPTIONS]
+    assert result["description_placeholders"] == {"title": "Front Door"}
+
+
+async def test_options_menu_has_one_row_on_an_entry_that_is_not_loaded(
+    hass: HomeAssistant,
+) -> None:
+    """Test the menu offers Lock options alone on an entry that is not loaded."""
+    entry = mock_entry()
     entry.add_to_hass(hass)
-
-    with patch(
-        "homeassistant.components.yalexs_ble.PushLock",
-        return_value=_get_mock_push_lock(),
-    ):
-        await hass.config_entries.async_setup(entry.entry_id)
-        await hass.async_block_till_done()
-
-    result = await hass.config_entries.options.async_init(
-        entry.entry_id,
+    push_lock_class = mock_push_lock_class(
+        mock_push_lock(), has=frozenset({"configure", "supported_options"})
     )
+
+    with patch_push_lock(push_lock_class):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["menu_options"] == [STEP_LOCK_OPTIONS]
+        assert result["description_placeholders"] == {"title": "Front Door"}
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {"next_step_id": STEP_LOCK_OPTIONS}
+        )
 
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "device_options"
+    assert result["step_id"] == STEP_LOCK_OPTIONS
 
-    with patch(
-        "homeassistant.components.yalexs_ble.async_setup_entry",
-        return_value=True,
-    ) as mock_setup_entry:
-        result2 = await hass.config_entries.options.async_configure(
+
+async def test_options_lock_options_shows_secure_mode_on_an_older_library(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test a library that advertises nothing leaves secure mode on the form."""
+    caplog.set_level(logging.DEBUG, logger="homeassistant.components.yalexs_ble")
+    entry = mock_entry()
+    push_lock_class = mock_push_lock_class(mock_push_lock())
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == STEP_LOCK_OPTIONS
+    assert {str(key) for key in result["data_schema"].schema} == {
+        CONF_ALWAYS_CONNECTED,
+        CONF_SECURE_MODE,
+    }
+    assert "library-supported options: none" in caplog.text
+
+
+async def test_options_lock_options_renders_the_fields_in_the_ruled_order(
+    hass: HomeAssistant, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Test the form renders the connection field and the features in the ruled order, and logs the report."""
+    caplog.set_level(logging.DEBUG, logger="homeassistant.components.yalexs_ble")
+    entry = mock_entry()
+    push_lock_class = mock_push_lock_class(
+        mock_push_lock(
+            accepted=frozenset({"always_connected", "door_sense"}),
+            ignored=frozenset({"secure_mode"}),
+        ),
+        has=frozenset({"configure", "supported_options"}),
+        supported=frozenset(
+            {
+                "activity_count",
+                "always_connected",
+                "battery_reporting",
+                "door_sense",
+                "parameters",
+                "secure_mode",
+                "unlatch",
+            }
+        ),
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+
+    assert [str(key) for key in result["data_schema"].schema] == [
+        CONF_ALWAYS_CONNECTED,
+        CONF_DOOR_SENSE,
+        CONF_AUTO_LOCK,
+        CONF_SECURE_MODE,
+        CONF_UNLATCH,
+        CONF_BATTERY_REPORTING,
+        CONF_ACTIVITY_COUNT,
+    ]
+    assert (
+        "options report at setup: accepted always_connected, door_sense; ignored "
+        "secure_mode" in caplog.text
+    )
+
+
+async def test_the_feature_selects_are_translated(hass: HomeAssistant) -> None:
+    """Test every feature select state has a label under the selector's translation key."""
+    entry = mock_entry()
+    push_lock_class = mock_push_lock_class(mock_push_lock())
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+
+    select = result["data_schema"].schema[CONF_SECURE_MODE]
+    assert select.config["translation_key"] == "feature_state"
+    translations = await translation.async_get_translations(
+        hass, "en", "selector", {DOMAIN}
+    )
+    assert all(
+        f"component.{DOMAIN}.selector.feature_state.options.{state}" in translations
+        for state in OPTION_STATES
+    )
+
+
+@pytest.mark.parametrize(
+    ("supported", "keys"),
+    [
+        pytest.param(
+            frozenset({"parameters"}),
+            {CONF_ALWAYS_CONNECTED, CONF_AUTO_LOCK, CONF_SECURE_MODE},
+            id="advertised",
+        ),
+        pytest.param(
+            frozenset(),
+            {CONF_ALWAYS_CONNECTED, CONF_SECURE_MODE},
+            id="not advertised",
+        ),
+    ],
+)
+async def test_options_lock_options_shows_auto_lock_when_parameters_is_advertised(
+    hass: HomeAssistant, supported: frozenset[str], keys: set[str]
+) -> None:
+    """Test the Auto-Lock select appears when the parameters key is advertised."""
+    entry = mock_entry()
+    push_lock_class = mock_push_lock_class(
+        mock_push_lock(),
+        has=frozenset({"configure", "supported_options"}),
+        supported=supported,
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+
+    assert {str(key) for key in result["data_schema"].schema} == keys
+
+
+async def test_options_lock_options_stores_the_choices(hass: HomeAssistant) -> None:
+    """Test the submit merges the choices over the stored options."""
+    entry = mock_entry({CONF_ACTIVITY_COUNT: OPTION_ON, "another_release_key": "on"})
+    push_lock = mock_push_lock()
+    push_lock_class = mock_push_lock_class(
+        push_lock,
+        has=frozenset({"configure", "supported_options"}),
+        supported=frozenset({"door_sense"}),
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+        result = await hass.config_entries.options.async_configure(
             result["flow_id"],
             {
                 CONF_ALWAYS_CONNECTED: True,
+                CONF_SECURE_MODE: OPTION_OFF,
+                CONF_DOOR_SENSE: OPTION_DEFAULT,
             },
         )
         await hass.async_block_till_done()
 
-    assert result2["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_ALWAYS_CONNECTED: True}
-    assert len(mock_setup_entry.mock_calls) == 1
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # A stored key this release has no field for survives; the library default
+    # choice is stored and sends nothing.
+    assert entry.options == {
+        CONF_ALWAYS_CONNECTED: True,
+        CONF_ACTIVITY_COUNT: OPTION_ON,
+        CONF_SECURE_MODE: OPTION_OFF,
+        CONF_DOOR_SENSE: OPTION_DEFAULT,
+        "another_release_key": "on",
+    }
+    assert push_lock.configure.mock_calls[-1].args[0] == {
+        "always_connected": True,
+        "activity_count": True,
+        "secure_mode": False,
+    }
+
+
+async def test_options_not_set_clears_the_key(hass: HomeAssistant) -> None:
+    """Test choosing not set returns a key to unconfigured."""
+    entry = mock_entry({CONF_DOOR_SENSE: OPTION_ON})
+    push_lock = mock_push_lock()
+    push_lock_class = mock_push_lock_class(
+        push_lock,
+        has=frozenset({"configure", "supported_options"}),
+        supported=frozenset({"door_sense"}),
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_ALWAYS_CONNECTED: False,
+                CONF_SECURE_MODE: OPTION_UNCONFIGURED,
+                CONF_DOOR_SENSE: OPTION_UNCONFIGURED,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert entry.options == {CONF_ALWAYS_CONNECTED: False}
+    assert push_lock.configure.mock_calls[-1].args[0] == {"always_connected": False}
+
+
+async def test_options_lock_options_defaults_to_the_stored_choice(
+    hass: HomeAssistant,
+) -> None:
+    """Test a stored choice is the rendered default and an absent key is not set."""
+    entry = mock_entry({CONF_ALWAYS_CONNECTED: True, CONF_DOOR_SENSE: OPTION_OFF})
+    push_lock_class = mock_push_lock_class(
+        mock_push_lock(),
+        has=frozenset({"configure", "supported_options"}),
+        supported=frozenset({"door_sense"}),
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+
+    defaults = {str(key): key.default() for key in result["data_schema"].schema}
+    assert defaults == {
+        CONF_ALWAYS_CONNECTED: True,
+        CONF_SECURE_MODE: OPTION_UNCONFIGURED,
+        CONF_DOOR_SENSE: OPTION_OFF,
+    }
+
+
+async def test_options_lock_options_shows_a_stored_key_the_library_dropped(
+    hass: HomeAssistant,
+) -> None:
+    """Test a key left by a library change can be returned to not set."""
+    entry = mock_entry({CONF_DOOR_SENSE: OPTION_OFF})
+    push_lock_class = mock_push_lock_class(
+        mock_push_lock(), has=frozenset({"configure", "supported_options"})
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+        assert {str(key) for key in result["data_schema"].schema} == {
+            CONF_ALWAYS_CONNECTED,
+            CONF_SECURE_MODE,
+            CONF_DOOR_SENSE,
+        }
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {
+                CONF_ALWAYS_CONNECTED: False,
+                CONF_SECURE_MODE: OPTION_UNCONFIGURED,
+                CONF_DOOR_SENSE: OPTION_UNCONFIGURED,
+            },
+        )
+        await hass.async_block_till_done()
+
+    assert entry.options == {CONF_ALWAYS_CONNECTED: False}
+
+
+async def test_options_lock_options_submit_ends_the_flow_and_reloads_the_entry(
+    hass: HomeAssistant,
+) -> None:
+    """Test a Lock options submit ends the flow and reloads the entry."""
+    entry = mock_entry()
+    push_lock = mock_push_lock()
+    push_lock_class = mock_push_lock_class(
+        push_lock, has=frozenset({"configure", "supported_options"})
+    )
+    await setup_entry(hass, entry, push_lock_class)
+
+    with patch_push_lock(push_lock_class):
+        result = await _open_lock_options(hass, entry)
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"],
+            {CONF_ALWAYS_CONNECTED: True, CONF_SECURE_MODE: OPTION_ON},
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.state is ConfigEntryState.LOADED
+    assert push_lock_class.call_count == 2
+    assert push_lock.configure.mock_calls[1].args[0] == {
+        "always_connected": True,
+        "secure_mode": True,
+    }
