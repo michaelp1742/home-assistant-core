@@ -1,6 +1,7 @@
 """The yalexs_ble integration models."""
 
 from dataclasses import dataclass
+from typing import TypedDict
 
 from yalexs_ble import PushLock
 
@@ -16,6 +17,19 @@ class LibraryReport:
 
     accepted: frozenset[str]
     ignored: frozenset[str]
+
+
+class ParameterRecord(TypedDict):
+    """The last value of one lock parameter Home Assistant read or wrote, kept in the entry's data for display.
+
+    value is the four bytes as the lock reported them; at is when the lock
+    answered, UTC; written is True when the record came from a write the lock
+    confirmed.
+    """
+
+    value: int
+    at: str
+    written: bool
 
 
 @dataclass(frozen=True)

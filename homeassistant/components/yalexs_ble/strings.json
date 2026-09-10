@@ -1,4 +1,11 @@
 {
+  "common": {
+    "as_read_note": "The lock holds {seconds} s, which is not on the list. As read from the lock keeps it.",
+    "not_read": "Not read yet",
+    "read_at": "{value}, read from the lock at {when}",
+    "seconds": "{seconds} s",
+    "written_at": "{value}, written to the lock at {when}"
+  },
   "config": {
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
@@ -61,14 +68,42 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "no_answer": "The lock did not answer. Check the lock is in range and try again.",
+      "no_answer_last_value": "The lock did not answer. Showing the value last read or written, at {when}. Check the lock is in range and try again."
+    },
+    "progress": {
+      "reading_auto_lock": "Reading the Auto-Lock setting from the lock",
+      "reading_unlatch_hold_time": "Reading the hold time from the lock"
+    },
     "step": {
+      "auto_lock": {
+        "title": "Auto-Lock"
+      },
+      "auto_lock_form": {
+        "data": {
+          "auto_lock_duration": "Auto-Lock duration",
+          "auto_lock_mode": "Auto-Lock mode"
+        },
+        "data_description": {
+          "auto_lock_duration": "On a timer: the wait after the door closes. Instant: the wait after unlocking if the door is never opened.",
+          "auto_lock_mode": "Instant relocks as soon as the door closes, so it needs the door sensor. On a timer relocks the duration below after the door closes. Off never relocks on its own."
+        },
+        "description": "The value shown is the lock's, read when this page opened, or the last one Home Assistant read or wrote when the lock did not answer. A change written while the lock is unlocked starts the timer at once.\n\n{as_read}",
+        "title": "Auto-Lock"
+      },
       "init": {
         "description": "Choose what to change for {title}.",
         "menu_option_descriptions": {
-          "lock_options": "Always connected, and the features Home Assistant offers for this lock."
+          "auto_lock": "{auto_lock}. Opening reads the lock.",
+          "lock_options": "Always connected, and the features Home Assistant offers for this lock.",
+          "unlatch_hold_time": "{unlatch_hold_time}. Opening reads the lock."
         },
         "menu_options": {
-          "lock_options": "Lock options"
+          "auto_lock": "Auto-Lock",
+          "lock_options": "Lock options",
+          "unlatch_hold_time": "Unlatch hold time"
         },
         "title": "Options"
       },
@@ -93,16 +128,63 @@
         },
         "description": "Not set means you have made no choice for the feature. Library default means you chose to leave it to the library. Both send nothing to the library, so its own answer holds for either. On and Off are sent to the library. A feature that Home Assistant adds, the Open action, the unread activity count and Auto-Lock, appears only when it is set to On. A feature whose key the installed library does not take is not offered, and the setup log records which keys were taken.",
         "title": "Lock options"
+      },
+      "unlatch_hold_time": {
+        "title": "Unlatch hold time"
+      },
+      "unlatch_hold_time_form": {
+        "data": {
+          "latch_pull_time": "Hold time"
+        },
+        "data_description": {
+          "latch_pull_time": "The lock's default is 5 seconds. The Yale app offers 3, 5, 10, 20 and 30 seconds."
+        },
+        "description": "How long the lock holds the latch back after the Open action before it springs out. The value shown is the lock's, read when this page opened, or the last one Home Assistant read or wrote when the lock did not answer.\n\n{as_read}",
+        "title": "Unlatch hold time"
       }
     }
   },
   "selector": {
+    "auto_lock_duration": {
+      "options": {
+        "10": "10 s",
+        "30": "30 s",
+        "60": "1 min",
+        "90": "1 min 30 s",
+        "120": "2 min",
+        "150": "2 min 30 s",
+        "180": "3 min",
+        "240": "4 min",
+        "300": "5 min",
+        "600": "10 min",
+        "1200": "20 min",
+        "1800": "30 min",
+        "as_read": "As read from the lock"
+      }
+    },
+    "auto_lock_mode": {
+      "options": {
+        "instant": "Instant",
+        "off": "Off",
+        "timed": "On a timer"
+      }
+    },
     "feature_state": {
       "options": {
         "default": "Library default",
         "off": "Off",
         "on": "On",
         "unconfigured": "Not set"
+      }
+    },
+    "unlatch_hold_time": {
+      "options": {
+        "3": "3 s",
+        "5": "5 s",
+        "10": "10 s",
+        "20": "20 s",
+        "30": "30 s",
+        "as_read": "As read from the lock"
       }
     }
   }

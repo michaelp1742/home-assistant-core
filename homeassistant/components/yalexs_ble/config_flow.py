@@ -1,6 +1,8 @@
 """Config flow for Yale Access Bluetooth integration."""
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Callable, Coroutine, Mapping
+from datetime import datetime
 import logging
 from typing import Any, Self, override
 
@@ -11,6 +13,7 @@ from yalexs_ble import (
     DisconnectedError,
     PushLock,
     ValidatedLockConfig,
+    YaleXSBLEError,
     local_name_is_unique,
 )
 from yalexs_ble.const import YALE_MFR_ID
@@ -30,26 +33,50 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import AbortFlow
+from homeassistant.helpers import translation
 from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
 )
 from homeassistant.helpers.typing import DiscoveryInfoType
+from homeassistant.util import dt as dt_util
 
 from .config_cache import async_add_validated_config, async_get_validated_config
 from .const import (
+    AUTO_LOCK_DEFAULT_DURATION,
+    AUTO_LOCK_DURATIONS,
+    AUTO_LOCK_MODE_INSTANT,
+    AUTO_LOCK_MODE_OFF,
+    AUTO_LOCK_MODE_TIMED,
+    AUTO_LOCK_MODES,
     CONF_ALWAYS_CONNECTED,
+    CONF_AUTO_LOCK_DURATION,
+    CONF_AUTO_LOCK_MODE,
     CONF_KEY,
+    CONF_LATCH_PULL_TIME,
     CONF_LOCAL_NAME,
     CONF_SLOT,
+    DATA_AUTO_LOCK,
+    DATA_LATCH_PULL_TIME,
     DOMAIN,
     FEATURE_GATES,
     FEATURE_OPTIONS,
+    OPTION_AS_READ,
     OPTION_STATES,
     OPTION_UNCONFIGURED,
+    PARAMETER_LATCH_PULL_TIME,
+    PARAMETER_RELOCK_SEC,
+    PROGRESS_READING_AUTO_LOCK,
+    PROGRESS_READING_UNLATCH_HOLD_TIME,
+    STEP_AUTO_LOCK,
+    STEP_AUTO_LOCK_FORM,
     STEP_LOCK_OPTIONS,
+    STEP_UNLATCH_HOLD_TIME,
+    STEP_UNLATCH_HOLD_TIME_FORM,
+    UNLATCH_HOLD_TIMES,
 )
+from .models import ParameterRecord
 from .util import async_find_existing_service_info, human_readable_name
 
 _LOGGER = logging.getLogger(__name__)
@@ -380,17 +407,125 @@ class YalexsConfigFlow(ConfigFlow, domain=DOMAIN):
         return YaleXSBLEOptionsFlowHandler()
 
 
+def _pack_auto_lock(mode: str, seconds: int) -> int:
+    """Pack a mode and a duration as the vendor app does."""
+    if mode == AUTO_LOCK_MODE_OFF:
+        return 0
+    if mode == AUTO_LOCK_MODE_TIMED:
+        return seconds | seconds << 16
+    return seconds
+
+
+def _unpack_auto_lock(value: int) -> tuple[str, int]:
+    """Decode a RELOCK_SEC value.
+
+    A set high half is On a timer with the door-close wait, a low half alone
+    is Instant with its never-opened wait, and zero is Off.
+    """
+    if value == 0:
+        return AUTO_LOCK_MODE_OFF, 0
+    if (door_close_seconds := (value >> 16) & 0xFFFF) > 0:
+        return AUTO_LOCK_MODE_TIMED, door_close_seconds
+    return AUTO_LOCK_MODE_INSTANT, value & 0xFFFF
+
+
+def _when(at: str) -> str:
+    """Return a record's time in local time, without the date when it is today."""
+    local = dt_util.as_local(datetime.fromisoformat(at))
+    if local.date() == dt_util.now().date():
+        return local.strftime("%H:%M")
+    return local.strftime("%Y-%m-%d %H:%M")
+
+
+def _duration_text(
+    translations: dict[str, str], translation_key: str, seconds: int
+) -> str:
+    """Return a duration select's word for the seconds, or the bare seconds off the list."""
+    word = translations.get(
+        f"component.{DOMAIN}.selector.{translation_key}.options.{seconds}"
+    )
+    return word or translations[f"component.{DOMAIN}.common.seconds"].format(
+        seconds=seconds
+    )
+
+
+def _parameter_status(
+    translations: dict[str, str], record: ParameterRecord | None, value: str
+) -> str:
+    """Return a menu row's status from its kept record, or that nothing was read."""
+    if record is None:
+        return translations[f"component.{DOMAIN}.common.not_read"]
+    fragment = "written_at" if record["written"] else "read_at"
+    return translations[f"component.{DOMAIN}.common.{fragment}"].format(
+        value=value, when=_when(record["at"])
+    )
+
+
 class YaleXSBLEOptionsFlowHandler(OptionsFlowWithReload):
     """Handle YaleXSBLE options."""
+
+    _read_task: asyncio.Task[int] | None = None
+    _read_value: int | None = None
+    _read_error: str | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show the menu: Lock options, and the parameter pages the stored choices and the library's report allow."""
+        auto_lock = False
+        unlatch_hold_time = False
+        if self.config_entry.state is ConfigEntryState.LOADED:
+            options = self.config_entry.runtime_data.options
+            auto_lock = options.auto_lock
+            unlatch_hold_time = options.unlatch_hold_time
+        menu_options = [STEP_LOCK_OPTIONS]
+        placeholders = {"title": self.config_entry.title}
+        translations: dict[str, str] = {}
+        if auto_lock or unlatch_hold_time:
+            # The frontend fills a placeholder with the text it is given, so a
+            # row's words are composed here, in the server's language, while
+            # the rest of the dialog is in the viewer's.
+            translations = {
+                **await translation.async_get_translations(
+                    self.hass, self.hass.config.language, "selector", {DOMAIN}
+                ),
+                **await translation.async_get_translations(
+                    self.hass, self.hass.config.language, "common", {DOMAIN}
+                ),
+            }
+        if auto_lock:
+            menu_options.append(STEP_AUTO_LOCK)
+            record: ParameterRecord | None = self.config_entry.data.get(DATA_AUTO_LOCK)
+            setting = ""
+            if record is not None:
+                mode, seconds = _unpack_auto_lock(record["value"])
+                setting = translations[
+                    f"component.{DOMAIN}.selector.{CONF_AUTO_LOCK_MODE}.options.{mode}"
+                ]
+                if mode != AUTO_LOCK_MODE_OFF:
+                    duration = _duration_text(
+                        translations, CONF_AUTO_LOCK_DURATION, seconds
+                    )
+                    setting = f"{setting}, {duration}"
+            placeholders[STEP_AUTO_LOCK] = _parameter_status(
+                translations, record, setting
+            )
+        if unlatch_hold_time:
+            menu_options.append(STEP_UNLATCH_HOLD_TIME)
+            held: ParameterRecord | None = self.config_entry.data.get(
+                DATA_LATCH_PULL_TIME
+            )
+            placeholders[STEP_UNLATCH_HOLD_TIME] = _parameter_status(
+                translations,
+                held,
+                ""
+                if held is None
+                else _duration_text(translations, "unlatch_hold_time", held["value"]),
+            )
         return self.async_show_menu(
             step_id="init",
-            menu_options=[STEP_LOCK_OPTIONS],
-            description_placeholders={"title": self.config_entry.title},
+            menu_options=menu_options,
+            description_placeholders=placeholders,
         )
 
     async def async_step_lock_options(
@@ -459,3 +594,332 @@ class YaleXSBLEOptionsFlowHandler(OptionsFlowWithReload):
             step_id=STEP_LOCK_OPTIONS,
             data_schema=vol.Schema(schema),
         )
+
+    async def async_step_auto_lock(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Read the auto-lock setting from the lock, then show its form."""
+        if self._read_task is not None and self._read_task.done():
+            return self._finish_read(
+                PARAMETER_RELOCK_SEC, DATA_AUTO_LOCK, STEP_AUTO_LOCK_FORM
+            )
+        return await self._start_read(
+            PARAMETER_RELOCK_SEC,
+            DATA_AUTO_LOCK,
+            STEP_AUTO_LOCK,
+            PROGRESS_READING_AUTO_LOCK,
+            self.async_step_auto_lock_form,
+        )
+
+    async def async_step_auto_lock_form(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the auto-lock mode and duration and write a change."""
+        record: ParameterRecord | None = self.config_entry.data.get(DATA_AUTO_LOCK)
+        value = self._read_value
+        if value is None and record is not None:
+            value = record["value"]
+        mode: str | None = None
+        read_seconds: int | None = None
+        selected: str | None = None
+        as_read = False
+        if value is not None:
+            mode, read_seconds = _unpack_auto_lock(value)
+            # Off holds no duration, so the form offers the one the app arms
+            # when its switch is turned on.
+            if mode == AUTO_LOCK_MODE_OFF:
+                read_seconds = AUTO_LOCK_DEFAULT_DURATION
+            as_read = read_seconds not in AUTO_LOCK_DURATIONS
+            selected = OPTION_AS_READ if as_read else str(read_seconds)
+        errors = {"base": self._read_error} if self._read_error is not None else {}
+
+        if user_input is not None:
+            chosen_mode: str = user_input[CONF_AUTO_LOCK_MODE]
+            chosen_duration: str = user_input[CONF_AUTO_LOCK_DURATION]
+            # As read from the lock stands for the seconds last read: kept
+            # unchanged after a read the lock answered, and written back from
+            # the record after one it did not, as any submit is then.
+            seconds = (
+                read_seconds
+                if chosen_duration == OPTION_AS_READ
+                else int(chosen_duration)
+            )
+            assert seconds is not None
+            packed = _pack_auto_lock(chosen_mode, seconds)
+            # The comparison is on the decoded pair: a value the lock holds
+            # with unequal halves shows as one setting, and a submit of that
+            # setting writes nothing.
+            if self._read_value is not None and _unpack_auto_lock(
+                packed
+            ) == _unpack_auto_lock(self._read_value):
+                return await self.async_step_init()
+            error = await self._write(PARAMETER_RELOCK_SEC, DATA_AUTO_LOCK, packed)
+            if error is None:
+                return await self.async_step_init()
+            errors = {"base": error}
+            mode = chosen_mode
+            selected = chosen_duration
+
+        durations = [str(duration) for duration in AUTO_LOCK_DURATIONS]
+        if as_read:
+            durations.append(OPTION_AS_READ)
+        as_read_note = await self._as_read_note(read_seconds if as_read else None)
+        return self.async_show_form(
+            step_id=STEP_AUTO_LOCK_FORM,
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_AUTO_LOCK_MODE,
+                        default=mode if mode is not None else vol.UNDEFINED,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=AUTO_LOCK_MODES,
+                            translation_key=CONF_AUTO_LOCK_MODE,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required(
+                        CONF_AUTO_LOCK_DURATION,
+                        default=selected if selected is not None else vol.UNDEFINED,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=durations,
+                            translation_key=CONF_AUTO_LOCK_DURATION,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "as_read": as_read_note,
+                "when": _when(record["at"]) if record is not None else "",
+            },
+        )
+
+    async def async_step_unlatch_hold_time(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Read the unlatch hold time from the lock, then show its form."""
+        if self._read_task is not None and self._read_task.done():
+            return self._finish_read(
+                PARAMETER_LATCH_PULL_TIME,
+                DATA_LATCH_PULL_TIME,
+                STEP_UNLATCH_HOLD_TIME_FORM,
+            )
+        return await self._start_read(
+            PARAMETER_LATCH_PULL_TIME,
+            DATA_LATCH_PULL_TIME,
+            STEP_UNLATCH_HOLD_TIME,
+            PROGRESS_READING_UNLATCH_HOLD_TIME,
+            self.async_step_unlatch_hold_time_form,
+        )
+
+    async def async_step_unlatch_hold_time_form(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the unlatch hold time and write a change."""
+        record: ParameterRecord | None = self.config_entry.data.get(
+            DATA_LATCH_PULL_TIME
+        )
+        read_seconds = self._read_value
+        if read_seconds is None and record is not None:
+            read_seconds = record["value"]
+        selected: str | None = None
+        as_read = False
+        if read_seconds is not None:
+            as_read = read_seconds not in UNLATCH_HOLD_TIMES
+            selected = OPTION_AS_READ if as_read else str(read_seconds)
+        errors = {"base": self._read_error} if self._read_error is not None else {}
+
+        if user_input is not None:
+            chosen: str = user_input[CONF_LATCH_PULL_TIME]
+            # As read from the lock stands for the seconds last read: kept
+            # unchanged after a read the lock answered, and written back from
+            # the record after one it did not, as any submit is then.
+            seconds = read_seconds if chosen == OPTION_AS_READ else int(chosen)
+            assert seconds is not None
+            if self._read_value is not None and seconds == self._read_value:
+                return await self.async_step_init()
+            error = await self._write(
+                PARAMETER_LATCH_PULL_TIME, DATA_LATCH_PULL_TIME, seconds
+            )
+            if error is None:
+                return await self.async_step_init()
+            errors = {"base": error}
+            selected = chosen
+
+        hold_times = [str(hold_time) for hold_time in UNLATCH_HOLD_TIMES]
+        if as_read:
+            hold_times.append(OPTION_AS_READ)
+        as_read_note = await self._as_read_note(read_seconds if as_read else None)
+        return self.async_show_form(
+            step_id=STEP_UNLATCH_HOLD_TIME_FORM,
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_LATCH_PULL_TIME,
+                        default=selected if selected is not None else vol.UNDEFINED,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=hold_times,
+                            translation_key="unlatch_hold_time",
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "as_read": as_read_note,
+                "when": _when(record["at"]) if record is not None else "",
+            },
+        )
+
+    async def _as_read_note(self, seconds: int | None) -> str:
+        """Return the note naming seconds the list does not hold, or nothing."""
+        if seconds is None:
+            return ""
+        translations = await translation.async_get_translations(
+            self.hass, self.hass.config.language, "common", {DOMAIN}
+        )
+        return translations[f"component.{DOMAIN}.common.as_read_note"].format(
+            seconds=seconds
+        )
+
+    async def _start_read(
+        self,
+        parameter: int,
+        key: str,
+        step_id: str,
+        progress_action: str,
+        form_step: Callable[[], Coroutine[Any, Any, ConfigFlowResult]],
+    ) -> ConfigFlowResult:
+        """Start the read of a parameter and show its progress screen.
+
+        An entry that is no longer loaded has no lock to ask, so the form is
+        shown at once, as after a read the lock did not answer. A read that is
+        already running keeps its progress screen.
+        """
+        if self._read_task is None:
+            self._read_value = None
+            self._read_error = None
+            if self.config_entry.state is not ConfigEntryState.LOADED:
+                _LOGGER.debug(
+                    "%s: parameter 0x%02x: the entry is not loaded",
+                    self.config_entry.title,
+                    parameter,
+                )
+                self._read_error = self._no_answer(key)
+                return await form_step()
+            self._read_task = self.hass.async_create_task(
+                self.config_entry.runtime_data.lock.get_parameter(parameter)
+            )
+        return self.async_show_progress(
+            step_id=step_id,
+            progress_action=progress_action,
+            progress_task=self._read_task,
+        )
+
+    @callback
+    def _finish_read(
+        self, parameter: int, key: str, next_step_id: str
+    ) -> ConfigFlowResult:
+        """Take the read's outcome from its task and move on to the form.
+
+        A value is kept in the entry's data as the last one read; an exception
+        becomes the form's error.
+        """
+        task = self._read_task
+        assert task is not None
+        self._read_task = None
+        try:
+            value = task.result()
+        except AuthError:
+            self._read_error = "invalid_auth"
+        except (TimeoutError, YaleXSBLEError, BleakError, RuntimeError) as err:
+            _LOGGER.debug(
+                "%s: parameter 0x%02x: no answer: %s",
+                self.config_entry.title,
+                parameter,
+                err,
+            )
+            self._read_error = self._no_answer(key)
+        # The read runs in a progress task with no caller to surface to, so
+        # any other failure is logged with its traceback and shown as a lock
+        # that did not answer.
+        except Exception:
+            _LOGGER.exception(
+                "%s: parameter 0x%02x: the read failed",
+                self.config_entry.title,
+                parameter,
+            )
+            self._read_error = self._no_answer(key)
+        else:
+            _LOGGER.debug(
+                "%s: read parameter 0x%02x: 0x%08x",
+                self.config_entry.title,
+                parameter,
+                value,
+            )
+            self._read_value = value
+            self._keep(key, value, written=False)
+        return self.async_show_progress_done(next_step_id=next_step_id)
+
+    async def _write(self, parameter: int, key: str, value: int) -> str | None:
+        """Write a parameter and keep the value the lock reports it stored.
+
+        Returns the form's error key when the lock did not answer, or None when
+        the write went through.
+        """
+        if self.config_entry.state is not ConfigEntryState.LOADED:
+            _LOGGER.debug(
+                "%s: parameter 0x%02x: the entry is not loaded",
+                self.config_entry.title,
+                parameter,
+            )
+            return "no_answer"
+        try:
+            stored = await self.config_entry.runtime_data.lock.set_parameter(
+                parameter, value
+            )
+        except AuthError:
+            return "invalid_auth"
+        except (TimeoutError, YaleXSBLEError, BleakError, RuntimeError) as err:
+            _LOGGER.debug(
+                "%s: parameter 0x%02x: no answer: %s",
+                self.config_entry.title,
+                parameter,
+                err,
+            )
+            return "no_answer"
+        _LOGGER.debug(
+            "%s: wrote parameter 0x%02x: 0x%08x",
+            self.config_entry.title,
+            parameter,
+            value,
+        )
+        if stored != value:
+            _LOGGER.warning(
+                "%s: the lock stored 0x%08x for parameter 0x%02x, not 0x%08x",
+                self.config_entry.title,
+                stored,
+                parameter,
+                value,
+            )
+        self._keep(key, stored, written=True)
+        return None
+
+    @callback
+    def _keep(self, key: str, value: int, written: bool) -> None:
+        """Keep a parameter value in the entry's data as the last one read or written."""
+        record = ParameterRecord(
+            value=value, at=dt_util.utcnow().isoformat(), written=written
+        )
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, data={**self.config_entry.data, key: record}
+        )
+
+    def _no_answer(self, key: str) -> str:
+        """Return the no-answer error, naming the kept value when there is one."""
+        return "no_answer_last_value" if key in self.config_entry.data else "no_answer"
