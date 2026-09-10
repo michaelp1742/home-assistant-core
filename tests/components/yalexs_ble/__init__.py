@@ -98,8 +98,15 @@ NOT_YALE_DISCOVERY_INFO = BluetoothServiceInfoBleak(
 KEY = "2fd51b8621c6a139eaffbedcb846b60f"
 
 
-def mock_entry(options: dict[str, Any] | None = None) -> MockConfigEntry:
-    """Return a config entry for the lock, carrying the options given."""
+def mock_entry(
+    options: dict[str, Any] | None = None,
+    data_extra: dict[str, Any] | None = None,
+) -> MockConfigEntry:
+    """Return a config entry for the lock, carrying the options given.
+
+    data_extra joins the credentials in the entry's data, for the parameter
+    records the options flow keeps there.
+    """
     return MockConfigEntry(
         domain=DOMAIN,
         title="Front Door",
@@ -108,6 +115,7 @@ def mock_entry(options: dict[str, Any] | None = None) -> MockConfigEntry:
             CONF_ADDRESS: YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
             CONF_KEY: KEY,
             CONF_SLOT: 66,
+            **(data_extra or {}),
         },
         options=options or {},
         unique_id=YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
@@ -137,6 +145,8 @@ def mock_push_lock(
     push_lock.unlock = AsyncMock()
     push_lock.securemode = AsyncMock()
     push_lock.unlatch = AsyncMock()
+    push_lock.get_parameter = AsyncMock()
+    push_lock.set_parameter = AsyncMock()
     push_lock.configure = MagicMock(
         return_value=Mock(accepted=accepted, ignored=ignored)
     )

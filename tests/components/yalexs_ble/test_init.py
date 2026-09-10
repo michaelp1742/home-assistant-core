@@ -17,6 +17,7 @@ from homeassistant.components.yalexs_ble.const import (
     CONF_KEY,
     CONF_SECURE_MODE,
     CONF_UNLATCH,
+    DATA_AUTO_LOCK,
     OPTION_DEFAULT,
     OPTION_OFF,
     OPTION_ON,
@@ -217,6 +218,36 @@ async def test_key_rotation_restart_keeps_the_configured_instance(
     assert push_lock.start.call_count == 2
     assert entry.data[CONF_KEY] == ROTATED_KEY
     assert entry.runtime_data.configure_report is not None
+
+
+async def test_the_key_rotation_update_keeps_the_parameter_records(
+    hass: HomeAssistant,
+) -> None:
+    """Test the key rotation update leaves the kept parameter records alone."""
+    record = {"value": 0x07080708, "at": "2026-09-11T10:32:00+00:00", "written": False}
+    entry = mock_entry({CONF_ALWAYS_CONNECTED: True}, {DATA_AUTO_LOCK: record})
+    async_add_validated_config(
+        hass,
+        YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
+        ValidatedLockConfig(
+            "Front Door",
+            YALE_ACCESS_LOCK_DISCOVERY_INFO.address,
+            "M1XXX012LU",
+            ROTATED_KEY,
+            67,
+        ),
+    )
+    push_lock = mock_push_lock(accepted=frozenset({"always_connected"}))
+    push_lock.wait_for_first_update = AsyncMock(
+        side_effect=[AuthError("key rotated"), None]
+    )
+
+    await setup_entry(
+        hass, entry, mock_push_lock_class(push_lock, has=frozenset({"configure"}))
+    )
+
+    assert entry.data[CONF_KEY] == ROTATED_KEY
+    assert entry.data[DATA_AUTO_LOCK] == record
 
 
 async def test_setup_passes_nothing_when_no_option_is_stored(

@@ -14,6 +14,39 @@ CONF_ACTIVITY_COUNT = "activity_count"
 CONF_AUTO_LOCK = "auto_lock"
 
 STEP_LOCK_OPTIONS = "lock_options"
+STEP_AUTO_LOCK = "auto_lock"
+STEP_AUTO_LOCK_FORM = "auto_lock_form"
+STEP_UNLATCH_HOLD_TIME = "unlatch_hold_time"
+STEP_UNLATCH_HOLD_TIME_FORM = "unlatch_hold_time_form"
+PROGRESS_READING_AUTO_LOCK = "reading_auto_lock"
+PROGRESS_READING_UNLATCH_HOLD_TIME = "reading_unlatch_hold_time"
+
+# The two lock parameters the options flow reads and writes. The ids, the
+# packing and the lists are the vendor app's; the library carries an id and
+# four bytes and interprets neither.
+PARAMETER_RELOCK_SEC = 0x28
+PARAMETER_LATCH_PULL_TIME = 0xB2
+
+# The entry.data keys holding the last value of each parameter.
+DATA_AUTO_LOCK = "auto_lock_setting"
+DATA_LATCH_PULL_TIME = "latch_pull_time"
+
+AUTO_LOCK_MODE_OFF = "off"
+AUTO_LOCK_MODE_INSTANT = "instant"
+AUTO_LOCK_MODE_TIMED = "timed"
+AUTO_LOCK_MODES = [AUTO_LOCK_MODE_OFF, AUTO_LOCK_MODE_INSTANT, AUTO_LOCK_MODE_TIMED]
+# The app's picker, in slider order, and the duration the app arms when its
+# switch is turned on.
+AUTO_LOCK_DURATIONS = (10, 30, 60, 90, 120, 150, 180, 240, 300, 600, 1200, 1800)
+AUTO_LOCK_DEFAULT_DURATION = 90
+# The app's picker; the lock's default is 5.
+UNLATCH_HOLD_TIMES = (3, 5, 10, 20, 30)
+# The one select option that is not a value: the seconds the lock holds when
+# they are not on the list, kept as they are.
+OPTION_AS_READ = "as_read"
+CONF_AUTO_LOCK_MODE = "auto_lock_mode"
+CONF_AUTO_LOCK_DURATION = "auto_lock_duration"
+CONF_LATCH_PULL_TIME = "latch_pull_time"
 
 # The states of a feature option. "Not set" is the absence of a choice: it is
 # rendered for a key the user never set and is never stored. "Library default"
