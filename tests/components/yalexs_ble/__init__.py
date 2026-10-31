@@ -155,8 +155,6 @@ def mock_push_lock(
         door=door,
         battery=None,
         auth=None,
-        auto_lock=None,
-        auto_lock_prev=None,
     )
     push_lock.lock_info = LockInfo("Front Door", model, "1.0.0", "1.0.0")
     push_lock.connection_info = ConnectionInfo(rssi=-60)

@@ -46,8 +46,6 @@ def _deliver(push_lock: MagicMock, status: LockStatus) -> None:
         door=DoorStatus.CLOSED,
         battery=None,
         auth=None,
-        auto_lock=None,
-        auto_lock_prev=None,
     )
     for call in push_lock.register_callback.call_args_list:
         call.args[0](state, push_lock.lock_info, push_lock.connection_info)
@@ -302,8 +300,6 @@ async def test_unlatch_statuses_map_to_opening_and_open(
         door=DoorStatus.CLOSED,
         battery=None,
         auth=None,
-        auto_lock=None,
-        auto_lock_prev=None,
     )
 
     with (
