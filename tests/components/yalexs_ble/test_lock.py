@@ -42,7 +42,6 @@ from homeassistant.core import (
     Event,
     EventStateChangedData,
     HomeAssistant,
-    ServiceResponse,
     State,
     callback,
 )
@@ -517,12 +516,20 @@ async def test_a_change_is_written_at_once_with_no_attributor(
     assert state.attributes.get(ATTR_CHANGED_BY) is None
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        pytest.param(YALE_ACCESS_LOCK_DISCOVERY_INFO.address, id="as stored"),
+        pytest.param(YALE_ACCESS_LOCK_DISCOVERY_INFO.address.lower(), id="lowercase"),
+    ],
+)
 async def test_an_attributor_sets_changed_by_on_the_written_change(
-    hass: HomeAssistant, freezer: FrozenDateTimeFactory
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, address: str
 ) -> None:
-    """Test the attributor is told after the write and sets changed_by on the change under its context."""
+    """Test an attributor registered with the lock's address in upper or lower case is told after the write and sets changed_by under the context it passes."""
     attributor = _Attributor(hass)
-    push_lock = await _setup_attributed_lock(hass, attributor, lock=LockStatus.LOCKED)
+    push_lock = await _setup_attributed_lock(hass, lock=LockStatus.LOCKED)
+    async_register_attributor(hass, address, attributor)
 
     _deliver(push_lock, LockStatus.UNLOCKED)
 
@@ -956,7 +963,7 @@ async def test_a_service_call_started_during_a_sets_write_keeps_its_context(
 
     push_lock.lock.side_effect = _lock
     call_context = Context()
-    calls: list[asyncio.Task[ServiceResponse]] = []
+    calls: list[asyncio.Task[None]] = []
     removers: list[CALLBACK_TYPE] = []
 
     @callback
@@ -964,16 +971,7 @@ async def test_a_service_call_started_during_a_sets_write_keeps_its_context(
         """Start the lock action as an eager task, once."""
         removers[0]()
         calls.append(
-            hass.async_create_task(
-                hass.services.async_call(
-                    LOCK_DOMAIN,
-                    SERVICE_LOCK,
-                    {ATTR_ENTITY_ID: LOCK},
-                    blocking=True,
-                    context=call_context,
-                ),
-                eager_start=True,
-            )
+            hass.async_create_task(_call_lock(hass, call_context), eager_start=True)
         )
 
     removers.append(async_track_state_change_event(hass, LOCK, _call_lock_now))
@@ -1036,21 +1034,19 @@ async def test_an_attributor_that_removes_itself_skips_no_other(
     """Test an attributor that removes its registration when told does not keep the next one from being told."""
     attributor = _Attributor(hass)
     push_lock = await _setup_attributed_lock(hass, lock=LockStatus.LOCKED)
-    removing = _Attributor(hass)
     removers: list[CALLBACK_TYPE] = []
 
-    class _RemovingAttributor:
+    class _RemovingAttributor(_Attributor):
         """Remove its own registration when told."""
 
         @callback
         def async_lock_status_changed(self, change: LockStatusChange) -> None:
             """Keep the change and remove the registration."""
-            removing.async_lock_status_changed(change)
+            super().async_lock_status_changed(change)
             removers[0]()
 
-    removers.append(
-        async_register_attributor(hass, push_lock.address, _RemovingAttributor())
-    )
+    removing = _RemovingAttributor(hass)
+    removers.append(async_register_attributor(hass, push_lock.address, removing))
     async_register_attributor(hass, push_lock.address, attributor)
 
     _deliver(push_lock, LockStatus.UNLOCKED)
@@ -1059,20 +1055,6 @@ async def test_an_attributor_that_removes_itself_skips_no_other(
     assert len(removing.changes) == 1
     assert attributor.changes[0] is removing.changes[0]
     assert len(attributor.changes) == 2
-
-
-async def test_an_attributor_registered_with_a_lowercase_address_is_told(
-    hass: HomeAssistant,
-) -> None:
-    """Test registration matches the lock's address whatever its case."""
-    attributor = _Attributor(hass)
-    push_lock = await _setup_attributed_lock(hass, lock=LockStatus.LOCKED)
-    async_register_attributor(hass, push_lock.address.lower(), attributor)
-
-    _deliver(push_lock, LockStatus.UNLOCKED)
-
-    (change,) = attributor.changes
-    assert change.entity_id == LOCK
 
 
 async def test_a_set_keeps_an_expired_service_call_context_expired(
