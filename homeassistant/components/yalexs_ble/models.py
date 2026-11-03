@@ -61,3 +61,4 @@ class YaleXSBLEData:
     lock: PushLock
     options: LockOptions
     configure_report: LibraryReport | None
+    lock_commands_in_flight: int = 0

@@ -1,5 +1,7 @@
 """Support for Yale Access Bluetooth locks."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, override
 
 from yalexs_ble import ConnectionInfo, LockInfo, LockState, LockStatus
@@ -9,13 +11,14 @@ from homeassistant.components.lock import (
     LockEntity,
     LockEntityFeature,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import YALEXSBLEConfigEntry
 from .const import DOMAIN
 from .entity import YALEXSBLEEntity
+from .helpers import DATA_ATTRIBUTORS, LockStatusChange
 from .models import YaleXSBLEData
 
 # The unlatch statuses arrived with the library release that added
@@ -73,6 +76,8 @@ class YaleXSBLEBaseLock(YALEXSBLEEntity, LockEntity):
     """A yale xs ble lock."""
 
     _secure_mode: bool = False
+    _lock_status: LockStatus | None = None
+    _change: LockStatusChange | None = None
 
     @callback
     @override
@@ -86,7 +91,7 @@ class YaleXSBLEBaseLock(YALEXSBLEEntity, LockEntity):
         self._attr_is_jammed = False
         self._attr_is_open = False
         self._attr_is_opening = False
-        lock_state = new_state.lock
+        lock_state = self._lock_status = new_state.lock
         if lock_state is LockStatus.LOCKED:
             self._attr_is_locked = not self._secure_mode
         elif lock_state is LockStatus.LOCKING:
@@ -109,10 +114,67 @@ class YaleXSBLEBaseLock(YALEXSBLEEntity, LockEntity):
             self._attr_is_locked = None
         super()._async_update_state(new_state, lock_info, connection_info)
 
+    @callback
+    @override
+    def _async_state_changed(
+        self, new_state: LockState, lock_info: LockInfo, connection_info: ConnectionInfo
+    ) -> None:
+        """Write the update, then tell the attributors about a change of the lock status."""
+        if new_state.lock is self._lock_status:
+            super()._async_state_changed(new_state, lock_info, connection_info)
+            return
+        # Read before the write, so a command that a state listener starts
+        # during the write does not mark this change.
+        commanded = self._data.lock_commands_in_flight > 0
+        # A set on the previous change made during this write does nothing.
+        self._change = None
+        self._attr_changed_by = None
+        super()._async_state_changed(new_state, lock_info, connection_info)
+        change = self._change = LockStatusChange(
+            self.entity_id,
+            self._device.address,
+            new_state,
+            commanded,
+            self._async_is_latest,
+            self._async_set_changed_by,
+        )
+        # A tuple, so an attributor that removes itself skips no other.
+        for attributor in tuple(
+            self.hass.data.get(DATA_ATTRIBUTORS, {}).get(self._device.address, ())
+        ):
+            attributor.async_lock_status_changed(change)
+
+    @callback
+    def _async_is_latest(self, change: LockStatusChange) -> bool:
+        """Return True until the entity starts writing its next change of the lock status after change."""
+        return change is self._change
+
+    @callback
+    def _async_set_changed_by(self, changed_by: str, context: Context | None) -> None:
+        """Write changed_by under context, for this one write."""
+        own_context = self._context, self._context_set
+        self._context, self._context_set = context, None
+        self._attr_changed_by = changed_by
+        self.async_write_ha_state()
+        # A service call started during the write keeps the context it set; otherwise
+        # the saved context is restored, so an earlier call's context still expires.
+        if self._context_set is None:
+            self._context, self._context_set = own_context
+
+    @asynccontextmanager
+    async def _commanding(self) -> AsyncIterator[None]:
+        """Count a command the entity sends to the lock while it is awaited."""
+        self._data.lock_commands_in_flight += 1
+        try:
+            yield
+        finally:
+            self._data.lock_commands_in_flight -= 1
+
     @override
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the lock."""
-        await self._device.unlock()
+        async with self._commanding():
+            await self._device.unlock()
 
 
 class YaleXSBLELock(YaleXSBLEBaseLock, LockEntity):
@@ -129,7 +191,8 @@ class YaleXSBLELock(YaleXSBLEBaseLock, LockEntity):
     @override
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the lock."""
-        await self._device.lock()
+        async with self._commanding():
+            await self._device.lock()
 
     @override
     async def async_open(self, **kwargs: Any) -> None:
@@ -138,7 +201,8 @@ class YaleXSBLELock(YaleXSBLEBaseLock, LockEntity):
         # key, and the open feature is offered only where that key was
         # accepted, so it is read with a default rather than named.
         unlatch: Any = getattr(self._device, "unlatch", None)
-        await unlatch()
+        async with self._commanding():
+            await unlatch()
 
 
 class YaleXSBLESecureModeLock(YaleXSBLEBaseLock):
@@ -170,4 +234,5 @@ class YaleXSBLESecureModeLock(YaleXSBLEBaseLock):
     @override
     async def async_lock(self, **kwargs: Any) -> None:
         """Lock the lock."""
-        await self._device.securemode()
+        async with self._commanding():
+            await self._device.securemode()
